@@ -294,21 +294,22 @@ async def get_singapore_ship_data(x_api_key: str = Header(..., alias="X-API-Key"
             # You may need to adjust this based on the actual API response structure
             transformed_data = []
             for ship in api_data:
+                vessel_particulars = ship.get("vesselParticulars", ship)
                 transformed_ship = {
-                    "vesselParticulars": {
-                        "vesselName": ship.get("vesselName", ""),
-                        "callSign": ship.get("callSign", ""),
-                        "imoNumber": ship.get("imoNumber", ""),
-                        "flag": ship.get("flag", ""),
-                        "vesselLength": float(ship.get("vesselLength", 0)),
-                        "vesselBreadth": float(ship.get("vesselBreadth", 0)),
-                        "vesselDepth": float(ship.get("vesselDepth", 0)),
-                        "vesselType": ship.get("vesselType", ""),
-                        "grossTonnage": float(ship.get("grossTonnage", 0)),
-                        "netTonnage": float(ship.get("netTonnage", 0)),
-                        "deadweight": float(ship.get("deadweight", 0)),
-                        "mmsiNumber": ship.get("mmsiNumber", ""),
-                        "yearBuilt": ship.get("yearBuilt", "")
+                   "vesselParticulars": {
+                        "vesselName": vessel_particulars.get("vesselName") or vessel_particulars.get("vessel_name", ""),
+                        "callSign": vessel_particulars.get("callSign") or vessel_particulars.get("call_sign", ""),
+                        "imoNumber": vessel_particulars.get("imoNumber") or vessel_particulars.get("imo_number", ""),
+                        "flag": vessel_particulars.get("flag", ""),
+                        "vesselLength": float(vessel_particulars.get("vesselLength") or vessel_particulars.get("vessel_length", 0)),
+                        "vesselBreadth": float(vessel_particulars.get("vesselBreadth") or vessel_particulars.get("vessel_breadth", 0)),
+                        "vesselDepth": float(vessel_particulars.get("vesselDepth") or vessel_particulars.get("vessel_depth", 0)),
+                        "vesselType": vessel_particulars.get("vesselType") or vessel_particulars.get("vessel_type", ""),
+                        "grossTonnage": float(vessel_particulars.get("grossTonnage") or vessel_particulars.get("gross_tonnage", 0)),
+                        "netTonnage": float(vessel_particulars.get("netTonnage") or vessel_particulars.get("net_tonnage", 0)),
+                        "deadweight": float(vessel_particulars.get("deadweight", 0)),
+                        "mmsiNumber": vessel_particulars.get("mmsiNumber") or vessel_particulars.get("mmsi_number", ""),
+                        "yearBuilt": vessel_particulars.get("yearBuilt") or vessel_particulars.get("year_built", "")
                     },
                     "latitude": float(ship.get("latitude", 0)),
                     "longitude": float(ship.get("longitude", 0)),
