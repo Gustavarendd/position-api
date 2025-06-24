@@ -1,5 +1,5 @@
 import json
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google.cloud import storage
@@ -7,6 +7,7 @@ from typing import List
 import os
 import logging
 import httpx
+from datetime import datetime, timedelta, timezone
 
 app = FastAPI()
 
@@ -21,10 +22,12 @@ app.add_middleware(
 BUCKET_NAME = "position-api"
 POSITION_FILE_NAME = "positions/position.txt"
 FUEL_CONSUMPTION_FILE_NAME = "fuel-consumption/ship_speed_consumption.json"
+SINGAPORE_CACHE_FOLDER = "singapore-cache/"  # Folder for caching Singapore API data
 
 # Singapore API configuration
 SINGAPORE_API_URL = os.getenv("SINGAPORE_API_URL", "https://sg-mdh-api.mpa.gov.sg/v1/vessel/positions/snapshot")  # Replace with actual API URL
-SINGAPORE_API_KEY = os.getenv("SINGAPORE_API_KEY", "GaTt74sQOi6WWXXQ9qtGixbuuGn6lFok")  # Replace with actual API key
+
+CACHE_EXPIRY_MINUTES = 10  # Cache expiry time in minutes
 
 class InputData(BaseModel):
     lon: float
@@ -59,6 +62,70 @@ class SingaporeApiResponse(BaseModel):
 
 def get_gcs_client():
     return storage.Client()
+
+
+def get_latest_cache_file():
+    """
+    Get the most recent cache file from GCS that's within the expiry time.
+    Returns (blob, timestamp) if valid cache exists, (None, None) otherwise.
+    """
+    try:
+        client = get_gcs_client()
+        bucket = client.bucket(BUCKET_NAME)
+        
+        # List all blobs in the singapore-cache folder
+        blobs = bucket.list_blobs(prefix=SINGAPORE_CACHE_FOLDER)
+        
+        valid_blobs = []
+        current_time = datetime.now(timezone.utc)
+        
+        for blob in blobs:
+            # Extract timestamp from filename (format: singapore-cache/YYYY-MM-DD_HH-MM-SS.json)
+            if blob.name.endswith('.json'):
+                try:
+                    filename = blob.name.replace(SINGAPORE_CACHE_FOLDER, '').replace('.json', '')
+                    file_timestamp = datetime.strptime(filename, '%Y-%m-%d_%H-%M-%S').replace(tzinfo=timezone.utc)
+
+                    
+                    # Check if file is within expiry time
+                    if current_time - file_timestamp <= timedelta(minutes=CACHE_EXPIRY_MINUTES):
+                        valid_blobs.append((blob, file_timestamp))
+                except ValueError:
+                    # Skip files with invalid timestamp format
+                    continue
+        
+        if valid_blobs:
+            # Return the most recent valid cache file
+            latest_blob, latest_timestamp = max(valid_blobs, key=lambda x: x[1])
+            return latest_blob, latest_timestamp
+        
+        return None, None
+    except Exception as e:
+        logging.warning(f"Error checking cache files: {e}")
+        return None, None
+
+
+def save_to_cache(data):
+    """
+    Save data to GCS with timestamp-based filename.
+    """
+    try:
+        client = get_gcs_client()
+        bucket = client.bucket(BUCKET_NAME)
+        
+        # Create filename with current timestamp
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
+        cache_filename = f"{SINGAPORE_CACHE_FOLDER}{timestamp}.json"
+        
+        blob = bucket.blob(cache_filename)
+        blob.upload_from_string(json.dumps(data, indent=2))
+        
+        logging.info(f"Cached Singapore API data to {cache_filename}")
+        return cache_filename
+    except Exception as e:
+        logging.error(f"Failed to save cache: {e}")
+        return None
+
 
 @app.get("/positions")
 async def get_data():
@@ -176,14 +243,34 @@ async def get_fuel_consumption_value(request: FuelRequest):
 
 
 @app.get("/api/ship", response_model=List[SingaporeApiResponse])
-async def get_singapore_ship_data():
+async def get_singapore_ship_data(x_api_key: str = Header(..., alias="X-API-Key")):
     """
-    Endpoint to fetch ship data from Singapore API.
+    Endpoint to fetch ship data from Singapore API with caching.
+    Checks for cached data within 10 minutes, otherwise fetches fresh data.
+    
+    Requires:
+        - X-API-Key header for authentication with the Singapore API.
     """
     try:
+        # Validate API key is provided
+        if not x_api_key or x_api_key.strip() == "":
+            raise HTTPException(status_code=400, detail="API key is required")
+        
+        # Check for cached data first
+        cached_blob, cache_timestamp = get_latest_cache_file()
+        
+        if cached_blob is not None:
+            logging.info(f"Using cached Singapore API data from {cache_timestamp}")
+            cached_content = cached_blob.download_as_text()
+            cached_data = json.loads(cached_content)
+            return cached_data
+        
+        # No valid cache found, fetch from API
+        logging.info("No valid cache found, fetching fresh data from Singapore API")
+        
         headers = {
             'Content-Type': 'application/json',
-            'apikey': SINGAPORE_API_KEY,
+            'apikey': x_api_key,
         }
         
         async with httpx.AsyncClient() as client:
@@ -234,6 +321,10 @@ async def get_singapore_ship_data():
                 }
                 transformed_data.append(transformed_ship)
             
+            # Save the fetched data to cache
+            save_to_cache(transformed_data)
+            
+            logging.info("Fetched and cached fresh Singapore API data")
             return transformed_data
         
     except httpx.RequestError as e:
